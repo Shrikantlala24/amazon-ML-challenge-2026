@@ -12,6 +12,9 @@ This document summarizes the actions performed during the initial context gather
   $$F_{0.5} = \frac{1.25 \times \text{Precision} \times \text{Recall}}{0.25 \times \text{Precision} + \text{Recall}}$$
   - Heavily favors **Precision** (weighted 2× over Recall) to severely penalize false merges.
   - Macro-average treats singletons (no matches) as full credit (1.0) if predicted empty, and 0.0 if any false match is predicted.
+- **🚨 CRITICAL COMPETITION UPDATE (Candidate Generation Scored for Final Ranking)**:
+  > **"Candidate generation counts toward the final ranking. We will review your candidate_pairs.tsv and the code that produces it when deciding final rankings, alongside your matching_results.tsv score. The approach that generates a smaller candidate set per Source 1 entity will be ranked higher in the final evaluation beyond the public/private leaderboard."**
+  - **Strategic Impact**: We cannot use naive wide-net blocking (e.g. 50-100 candidates). Our blocking engine must be ultra-selective, aiming for an average of **$\approx 5 - 8$ candidates per entity** while preserving $>95\%$ recall.
 
 ---
 
