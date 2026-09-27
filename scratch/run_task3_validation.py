@@ -3,6 +3,7 @@ import os
 import time
 import re
 import csv
+import gc
 import unicodedata
 from collections import defaultdict, Counter
 from rapidfuzz import fuzz
@@ -10,7 +11,7 @@ from rapidfuzz import fuzz
 DATA_DIR = "dataset_folder/student_resource/dataset"
 TRAIN_DIR = os.path.join(DATA_DIR, "train")
 
-# 1. Normalizers
+# 1. Normalizers (matching Cell 4 of 07_sota_tournament_master.ipynb)
 def clean_latin_name(name: str) -> str:
     if not name or not isinstance(name, str): return ""
     text = unicodedata.normalize('NFKD', name)
@@ -28,11 +29,15 @@ def clean_vernacular_name(name: str) -> str:
     text = re.sub(r'[^\w\s]', ' ', text)
     return ' '.join(text.split())
 
+# Task 2 fix: extract domain from raw_name before punctuation stripping
 def extract_domain_and_concat(raw_name: str, clean_name: str = None):
     if not raw_name or not isinstance(raw_name, str):
         return "", ""
-    stripped = re.sub(r'\.(com|org|net|in|co|io|biz|info|fr|gov|edu)\b.*$', '', raw_name, flags=re.IGNORECASE)
-    base = clean_latin_name(stripped)
+    if '.' in raw_name:
+        stripped = re.sub(r'\.(com|org|net|in|co|io|biz|info|fr|gov|edu)\b.*$', '', raw_name, flags=re.IGNORECASE)
+        base = clean_latin_name(stripped)
+    else:
+        base = clean_name if clean_name is not None else clean_latin_name(raw_name)
     concat = base.replace(' ', '')
     return base, concat
 
@@ -64,7 +69,7 @@ def extract_addr_tokens(addr: str):
     words = {t for t in tokens if len(t) >= 4 and not t.isdigit() and t not in STOPWORDS}
     return numbers, words
 
-# 2. Key Generation
+# 2. Key Generation (matching SotaInvertedIndex.make_keys in Cell 6)
 def make_keys(raw_name, raw_addr, country):
     keys = set()
     c_name = clean_latin_name(raw_name)
@@ -112,7 +117,7 @@ def make_keys(raw_name, raw_addr, country):
             
     return keys
 
-# 3. Matcher Gate
+# 3. Matcher Gate (matching Cell 8)
 def is_match(s1_raw_name, s1_clean_name, s1_clean_addr, s1_nums, s1_words, s1_concat,
              cand_raw_name, cand_clean_name, cand_clean_addr, cand_nums, cand_words, cand_concat) -> bool:
     n1 = s1_clean_name
@@ -181,14 +186,14 @@ def is_match(s1_raw_name, s1_clean_name, s1_clean_addr, s1_nums, s1_words, s1_co
     return False
 
 def run_validation():
-    print("=" * 70)
-    print("📊 Amazon ML Challenge 2026: Local F0.5 Validation Harness (30,000 Sample)")
-    print("=" * 70)
-    print("⚠️  DATASET LIMITATION NOTE:")
-    print("    France is present ONLY in the test dataset (~15% of test records).")
-    print("    The training dataset contains only US (~60%) and India (~40%).")
-    print("    Therefore, this validation harness evaluates the US and India partitions.")
-    print("=" * 70)
+    print("=" * 70, flush=True)
+    print("📊 Amazon ML Challenge 2026: Local F0.5 Validation Harness (30,000 Sample)", flush=True)
+    print("=" * 70, flush=True)
+    print("⚠️  DATASET LIMITATION NOTE:", flush=True)
+    print("    France is present ONLY in the test dataset (~15% of test records).", flush=True)
+    print("    The training dataset contains only US (~60%) and India (~40%).", flush=True)
+    print("    Therefore, this validation harness evaluates the US and India partitions.", flush=True)
+    print("=" * 70, flush=True)
 
     # 1. Stratified Sampling of 30,000 S1 records from train_source1.tsv
     sample_targets_us = 18000
@@ -197,7 +202,7 @@ def run_validation():
     sampled_s1 = {'US': [], 'India': []}
     s1_needed_ids = set()
     
-    print("\n[Step 1/5] Sampling 30,000 stratified entities from train_source1.tsv...")
+    print("\n[Step 1/5] Sampling 30,000 stratified entities from train_source1.tsv...", flush=True)
     t0 = time.time()
     with open(os.path.join(TRAIN_DIR, "train_source1.tsv"), "r", encoding="utf-8") as f:
         r = csv.reader(f, delimiter="\t")
@@ -214,10 +219,10 @@ def run_validation():
             if len(sampled_s1['US']) >= sample_targets_us and len(sampled_s1['India']) >= sample_targets_in:
                 break
                 
-    print(f"  Sampled {len(sampled_s1['US']):,} US entities and {len(sampled_s1['India']):,} India entities in {time.time()-t0:.2f}s.")
+    print(f"  Sampled {len(sampled_s1['US']):,} US entities and {len(sampled_s1['India']):,} India entities in {time.time()-t0:.2f}s.", flush=True)
     
     # 2. Load Ground Truth for Sampled Entities
-    print("\n[Step 2/5] Loading ground truth for sampled entities...")
+    print("\n[Step 2/5] Loading ground truth for sampled entities...", flush=True)
     t0 = time.time()
     gt = {}
     total_true_matches = 0
@@ -239,9 +244,100 @@ def run_validation():
                 if len(gt) >= len(s1_needed_ids):
                     break
                     
-    print(f"  Loaded ground truth in {time.time()-t0:.2f}s: {len(gt):,} entities, {total_true_matches:,} true target links, {singletons:,} singletons ({singletons/len(gt):.2%}).")
+    print(f"  Loaded ground truth in {time.time()-t0:.2f}s: {len(gt):,} entities, {total_true_matches:,} true target links, {singletons:,} singletons ({singletons/len(gt):.2%}).", flush=True)
 
-    # 3. Country-by-Country Production Execution
+    # 3. Precompute S1 Query Keys
+    print("\n[Step 3/5] Precomputing S1 query keys for US and India...", flush=True)
+    t0 = time.time()
+    s1_needed_keys = {'US': set(), 'India': set()}
+    for country in ['US', 'India']:
+        for s1_id, s1_name, s1_addr in sampled_s1[country]:
+            for k in make_keys(s1_name, s1_addr, country):
+                s1_needed_keys[country].add(k)
+        print(f"  {country}: {len(s1_needed_keys[country]):,} distinct search keys active.", flush=True)
+    print(f"  Precomputed keys in {time.time()-t0:.2f}s.", flush=True)
+
+    # 4. Build inverted index for both countries in a single pass over source2 and source3
+    print("\n[Step 4/5] Indexing target records from train_source2.tsv and train_source3.tsv...", flush=True)
+    index = {'US': defaultdict(list), 'India': defaultdict(list)}
+    idx_t0 = time.time()
+    n_targets = 0
+    
+    for fname in ["train_source2.tsv", "train_source3.tsv"]:
+        fpath = os.path.join(TRAIN_DIR, fname)
+        f_t0 = time.time()
+        with open(fpath, "r", encoding="utf-8") as f:
+            r = csv.reader(f, delimiter="\t")
+            hdr = next(r)
+            c_idx = hdr.index("country")
+            for row in r:
+                country = row[c_idx].strip()
+                if country in index:
+                    eid = row[0]
+                    name = row[1]
+                    addr = row[2]
+                    for k in make_keys(name, addr, country):
+                        if k in s1_needed_keys[country]:
+                            index[country][k].append(eid)
+                    n_targets += 1
+        print(f"  Scanned {fname} in {time.time()-f_t0:.2f}s.", flush=True)
+        
+    print(f"  Indexed {n_targets:,} target records across US ({len(index['US']):,} keys) and India ({len(index['India']):,} keys) in {time.time()-idx_t0:.2f}s.", flush=True)
+    
+    # 5. Query candidates and evaluate Matcher Gate
+    print("\n[Step 5/5] Querying candidates and evaluating Matcher Gate...", flush=True)
+    q_t0 = time.time()
+    s1_query_data = {'US': [], 'India': []}
+    needed_target_ids = set()
+    
+    for country in ['US', 'India']:
+        for s1_id, s1_name, s1_addr in sampled_s1[country]:
+            keys = make_keys(s1_name, s1_addr, country)
+            counts = Counter()
+            for k in keys:
+                for eid in index[country].get(k, []):
+                    counts[eid] += 1
+                    
+            pool = [eid for eid, _ in counts.most_common(8)]
+            cand_basket = pool[:5]  # Strict Task 1 fix
+            
+            s1_query_data[country].append((s1_id, s1_name, s1_addr, pool, cand_basket))
+            for cid in cand_basket:
+                needed_target_ids.add(cid)
+                
+    print(f"  Queried candidates in {time.time()-q_t0:.2f}s. Unique target records to evaluate: {len(needed_target_ids):,}", flush=True)
+    
+    # Free index memory
+    del index
+    gc.collect()
+    
+    # Load attributes for candidate basket IDs in a single pass over source2 and source3
+    print(f"  Loading attributes for {len(needed_target_ids):,} retrieved candidates...", flush=True)
+    attr_t0 = time.time()
+    target_attributes = {}
+    for fname in ["train_source2.tsv", "train_source3.tsv"]:
+        fpath = os.path.join(TRAIN_DIR, fname)
+        with open(fpath, "r", encoding="utf-8") as f:
+            r = csv.reader(f, delimiter="\t")
+            next(r)
+            for row in r:
+                eid = row[0]
+                if eid in needed_target_ids:
+                    raw_name = row[1]
+                    raw_addr = row[2]
+                    c_name = clean_latin_name(raw_name)
+                    c_addr = clean_address(raw_addr)
+                    nums, words = extract_addr_tokens(raw_addr)
+                    _, concat = extract_domain_and_concat(raw_name, c_name)
+                    target_attributes[eid] = (raw_name, c_name, c_addr, nums, words, concat)
+                    if len(target_attributes) >= len(needed_target_ids):
+                        break
+        if len(target_attributes) >= len(needed_target_ids):
+            break
+            
+    print(f"  Attributes loaded in {time.time()-attr_t0:.2f}s ({len(target_attributes):,} found).", flush=True)
+
+    # Country-by-Country Evaluation
     results_by_country = {}
     all_s1_f05 = []
     all_candidates_count = 0
@@ -252,91 +348,8 @@ def run_validation():
     total_fp = 0
     total_fn = 0
     failing_examples = []
-    
+
     for country in ['US', 'India']:
-        print(f"\n=================================================================")
-        print(f"🌍 Running Validation on {country} ({len(sampled_s1[country]):,} S1 entities)...")
-        print(f"=================================================================")
-        c_t0 = time.time()
-        
-        # Build inverted index for this country
-        print(f"  [A] Indexing target records from train_source2.tsv and train_source3.tsv...")
-        index = defaultdict(list)
-        idx_t0 = time.time()
-        n_targets = 0
-        
-        # We index targets from train_source2 and train_source3
-        for fname in ["train_source2.tsv", "train_source3.tsv"]:
-            fpath = os.path.join(TRAIN_DIR, fname)
-            with open(fpath, "r", encoding="utf-8") as f:
-                r = csv.reader(f, delimiter="\t")
-                hdr = next(r)
-                c_idx = hdr.index("country")
-                for row in r:
-                    if row[c_idx].strip() == country:
-                        eid = row[0]
-                        name = row[1]
-                        addr = row[2]
-                        for k in make_keys(name, addr, country):
-                            index[k].append(eid)
-                        n_targets += 1
-                        
-        print(f"      Indexed {n_targets:,} target records in {time.time()-idx_t0:.2f}s ({len(index):,} distinct keys).")
-        
-        # [B] Query candidates for sampled S1 entities
-        print(f"  [B] Querying candidates for {len(sampled_s1[country]):,} {country} entities...")
-        q_t0 = time.time()
-        
-        s1_query_data = [] # (s1_id, s1_name, s1_addr, pool, cand_basket)
-        needed_target_ids = set()
-        
-        for s1_id, s1_name, s1_addr in sampled_s1[country]:
-            keys = make_keys(s1_name, s1_addr, country)
-            counts = Counter()
-            for k in keys:
-                for eid in index.get(k, []):
-                    counts[eid] += 1
-                    
-            pool = [eid for eid, _ in counts.most_common(8)]
-            cand_basket = pool[:5] # Strict Task 1 fix
-            
-            s1_query_data.append((s1_id, s1_name, s1_addr, pool, cand_basket))
-            for cid in cand_basket:
-                needed_target_ids.add(cid)
-                
-        print(f"      Queried in {time.time()-q_t0:.2f}s. Unique target records to evaluate: {len(needed_target_ids):,}")
-        
-        # Free index memory
-        del index
-        
-        # [C] Load attributes only for the retrieved candidates in cand_basket
-        print(f"  [C] Loading attributes for {len(needed_target_ids):,} retrieved candidates...")
-        attr_t0 = time.time()
-        target_attributes = {}
-        for fname in ["train_source2.tsv", "train_source3.tsv"]:
-            fpath = os.path.join(TRAIN_DIR, fname)
-            with open(fpath, "r", encoding="utf-8") as f:
-                r = csv.reader(f, delimiter="\t")
-                next(r)
-                for row in r:
-                    eid = row[0]
-                    if eid in needed_target_ids:
-                        raw_name = row[1]
-                        raw_addr = row[2]
-                        c_name = clean_latin_name(raw_name)
-                        c_addr = clean_address(raw_addr)
-                        nums, words = extract_addr_tokens(raw_addr)
-                        _, concat = extract_domain_and_concat(raw_name, c_name)
-                        target_attributes[eid] = (raw_name, c_name, c_addr, nums, words, concat)
-                        if len(target_attributes) >= len(needed_target_ids):
-                            break
-                            
-        print(f"      Attributes loaded in {time.time()-attr_t0:.2f}s.")
-        
-        # [D] Run Matcher Gate over cand_basket ONLY (Task 1 logic) and compute metrics
-        print(f"  [D] Running Matcher Gate over cand_basket only & evaluating F0.5...")
-        m_t0 = time.time()
-        
         c_f05_scores = []
         c_cand_counts = 0
         c_blocking_pool_hits = 0
@@ -346,7 +359,7 @@ def run_validation():
         c_fp = 0
         c_fn = 0
         
-        for s1_id, s1_name, s1_addr, pool, cand_basket in s1_query_data:
+        for s1_id, s1_name, s1_addr, pool, cand_basket in s1_query_data[country]:
             c_cand_counts += len(cand_basket)
             true_targets = gt.get(s1_id, set())
             c_gt_matches_count += len(true_targets)
@@ -360,7 +373,7 @@ def run_validation():
             s1_nums, s1_words = extract_addr_tokens(s1_addr)
             _, s1_concat = extract_domain_and_concat(s1_name, s1_cl_name)
             
-            # Matcher evaluation over cand_basket ONLY
+            # Matcher evaluation over cand_basket ONLY (Task 1 logic)
             matched_ids = []
             for cid in cand_basket:
                 c_rec = target_attributes.get(cid)
@@ -372,7 +385,7 @@ def run_validation():
                     matched_ids.append(cid)
                     
             # Task 1 subset assertion check
-            assert set(matched_ids).issubset(set(cand_basket)), f"Subset violation for {s1_id}!"
+            assert set(matched_ids).issubset(set(cand_basket)), f"Candidate audit violation: matched_ids {matched_ids} not subset of cand_basket {cand_basket}!"
             
             # Per-entity F0.5 calculation
             tp = len(set(matched_ids) & true_targets)
@@ -384,7 +397,7 @@ def run_validation():
             c_fn += fn
             
             if len(true_targets) == 0:
-                # Singleton entity
+                # Singleton entity: 1.0 if empty predicted, 0.0 if any FP predicted
                 f05 = 1.0 if len(matched_ids) == 0 else 0.0
             elif tp == 0:
                 f05 = 0.0
@@ -432,17 +445,16 @@ def run_validation():
             'blocking_recall_basket5': c_basket_recall,
             'matcher_precision': c_gate_prec,
             'matcher_recall': c_gate_rec,
-            'tp': c_tp, 'fp': c_fp, 'fn': c_fn,
-            'time_sec': time.time() - c_t0
+            'tp': c_tp, 'fp': c_fp, 'fn': c_fn
         }
         
-        print(f"  ✅ {country} Completed in {(time.time()-c_t0)/60:.2f} mins:")
-        print(f"     Macro F0.5 Score         : {c_macro_f05:.4f} ({c_macro_f05*100:.2f}%)")
-        print(f"     Average Candidates/Entity: {c_avg_cands:.2f} (Audit constraint <= 5.0: {'PASS' if c_avg_cands <= 5.0 else 'FAIL'})")
-        print(f"     Blocking Recall (Top 8)  : {c_pool_recall:.2%}")
-        print(f"     Blocking Recall (Top 5)  : {c_basket_recall:.2%}")
-        print(f"     Matcher Gate Precision   : {c_gate_prec:.2%}")
-        print(f"     Matcher Gate Recall      : {c_gate_rec:.2%}")
+        print(f"\n🌍 {country} Results Summary ({len(sampled_s1[country]):,} entities):", flush=True)
+        print(f"   Macro F0.5 Score         : {c_macro_f05:.4f} ({c_macro_f05*100:.2f}%)", flush=True)
+        print(f"   Average Candidates/Entity: {c_avg_cands:.2f} (Audit constraint <= 5.0: {'PASS ✅' if c_avg_cands <= 5.0 else 'FAIL ❌'})", flush=True)
+        print(f"   Blocking Recall (Top 8)  : {c_pool_recall:.2%}", flush=True)
+        print(f"   Blocking Recall (Top 5)  : {c_basket_recall:.2%}", flush=True)
+        print(f"   Matcher Gate Precision   : {c_gate_prec:.2%}", flush=True)
+        print(f"   Matcher Gate Recall      : {c_gate_rec:.2%}", flush=True)
 
     # Overall Summary
     macro_f05_overall = sum(all_s1_f05) / len(all_s1_f05)
@@ -452,41 +464,41 @@ def run_validation():
     overall_prec = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0
     overall_rec = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0
     
-    print("\n" + "=" * 70)
-    print("🏆 OVERALL VALIDATION SUMMARY (30,000 Stratified S1 Entities)")
-    print("=" * 70)
-    print(f"Overall Macro F0.5 Score       : {macro_f05_overall:.4f} ({macro_f05_overall*100:.2f}%)")
-    print(f"Average Candidates per Entity  : {overall_avg_cands:.2f} (<= 5.0 Audit Requirement: {'PASSED ✅' if overall_avg_cands <= 5.0 else 'FAILED ❌'})")
-    print(f"Candidate Blocking Recall (Pool 8): {overall_pool_recall:.2%}")
-    print(f"Candidate Blocking Recall (Top 5) : {overall_basket_recall:.2%}")
-    print(f"Overall Matcher Gate Precision : {overall_prec:.2%}")
-    print(f"Overall Matcher Gate Recall    : {overall_rec:.2%}")
-    print("-" * 70)
-    print("PER-COUNTRY BREAKDOWN:")
+    print("\n" + "=" * 70, flush=True)
+    print("🏆 OVERALL VALIDATION SUMMARY (30,000 Stratified S1 Entities)", flush=True)
+    print("=" * 70, flush=True)
+    print(f"Overall Macro F0.5 Score       : {macro_f05_overall:.4f} ({macro_f05_overall*100:.2f}%)", flush=True)
+    print(f"Average Candidates per Entity  : {overall_avg_cands:.2f} (<= 5.0 Audit Requirement: {'PASSED ✅' if overall_avg_cands <= 5.0 else 'FAILED ❌'})", flush=True)
+    print(f"Candidate Blocking Recall (Pool 8): {overall_pool_recall:.2%}", flush=True)
+    print(f"Candidate Blocking Recall (Top 5) : {overall_basket_recall:.2%}", flush=True)
+    print(f"Overall Matcher Gate Precision : {overall_prec:.2%}", flush=True)
+    print(f"Overall Matcher Gate Recall    : {overall_rec:.2%}", flush=True)
+    print("-" * 70, flush=True)
+    print("PER-COUNTRY BREAKDOWN:", flush=True)
     for c, r in results_by_country.items():
-        print(f"  {c:7s}: Macro F0.5 = {r['macro_f05']:.4f} | Avg Cands = {r['avg_candidates']:.2f} | Blocking Rec(Top 5) = {r['blocking_recall_basket5']:.2%} | Prec = {r['matcher_precision']:.2%} | Rec = {r['matcher_recall']:.2%}")
-    print("=" * 70)
+        print(f"  {c:7s}: Macro F0.5 = {r['macro_f05']:.4f} | Avg Cands = {r['avg_candidates']:.2f} | Blocking Rec(Top 5) = {r['blocking_recall_basket5']:.2%} | Prec = {r['matcher_precision']:.2%} | Rec = {r['matcher_recall']:.2%}", flush=True)
+    print("=" * 70, flush=True)
 
-    # Failing examples
+    # Failing examples audit
     if len(failing_examples) > 0:
-        print("\n🔍 SAMPLE FAILING PAIRS AUDIT (Up to 5 examples):")
+        print("\n🔍 SAMPLE FAILING PAIRS AUDIT (5 examples):", flush=True)
         for i, ex in enumerate(failing_examples[:5]):
-            print(f"\n--- Failing Example #{i+1} [{ex['country']}] ---")
-            print(f"  S1 ID: {ex['s1_id']}")
-            print(f"  S1 Name: '{ex['s1_name']}'")
-            print(f"  S1 Addr: '{ex['s1_addr']}'")
-            print(f"  True Target IDs: {list(ex['true_targets'])}")
-            print(f"  Top 5 Cand Basket: {ex['cand_basket']}")
-            print(f"  Predicted Matches: {ex['matched_ids']}")
-            print(f"  TP: {ex['tp']}, FP: {ex['fp']}, FN: {ex['fn']} -> Entity F0.5: {ex['f05']:.4f}")
+            print(f"\n--- Failing Example #{i+1} [{ex['country']}] ---", flush=True)
+            print(f"  S1 ID: {ex['s1_id']}", flush=True)
+            print(f"  S1 Name: '{ex['s1_name']}'", flush=True)
+            print(f"  S1 Addr: '{ex['s1_addr']}'", flush=True)
+            print(f"  True Target IDs: {list(ex['true_targets'])}", flush=True)
+            print(f"  Top 5 Cand Basket: {ex['cand_basket']}", flush=True)
+            print(f"  Predicted Matches: {ex['matched_ids']}", flush=True)
+            print(f"  TP: {ex['tp']}, FP: {ex['fp']}, FN: {ex['fn']} -> Entity F0.5: {ex['f05']:.4f}", flush=True)
             in_pool = set(ex['pool']) & ex['true_targets']
             in_basket = set(ex['cand_basket']) & ex['true_targets']
-            print(f"  Target in Top 8 Pool: {list(in_pool) if in_pool else 'MISS (Blocking Recall failure)'}")
-            print(f"  Target in Top 5 Basket: {list(in_basket) if in_basket else 'MISS (Ranked 6-8 or not retrieved)'}")
+            print(f"  Target in Top 8 Pool: {list(in_pool) if in_pool else 'MISS (Blocking Recall failure)'}", flush=True)
+            print(f"  Target in Top 5 Basket: {list(in_basket) if in_basket else 'MISS (Ranked 6-8 or not retrieved)'}", flush=True)
             if in_basket and not ex['matched_ids']:
-                print(f"  Failure Mode: MATCHER PRECISION/THRESHOLD TOO STRICT (Candidate was in basket but rejected by is_match)")
+                print(f"  Failure Mode: MATCHER GATE REJECT (Candidate was in basket but rejected by is_match)", flush=True)
             elif not in_basket:
-                print(f"  Failure Mode: BLOCKING / CANDIDATE GENERATION MISS")
+                print(f"  Failure Mode: BLOCKING / CANDIDATE GENERATION MISS", flush=True)
                 
     return macro_f05_overall, results_by_country
 
