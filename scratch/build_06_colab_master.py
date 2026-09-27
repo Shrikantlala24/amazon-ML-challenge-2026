@@ -8,7 +8,7 @@ notebook = {
    "metadata": {},
    "source": [
     "# 🏆 Amazon ML Challenge 2026: Tournament Master Pipeline (Score Target: 0.98+)\n",
-    "## ⚡ Multi-Key Inverted Index + C++ Dual-Track Scoring + LightGBM + Graph Transitivity\n",
+    "## ⚡ Multi-Key Inverted Index + C++ Dual-Track Scoring + Matcher Gate\n",
     "\n",
     "---\n",
     "\n",
@@ -17,8 +17,7 @@ notebook = {
     "2. **>98.5% Blocking Recall**: Multi-key indexing captures word order swaps, dropped articles (`The`), typos, and OCR glitches without bloated candidate pools.\n",
     "3. **Amazon Audit Compliance**: Caps candidate baskets at **maximum 5 candidates per entity** ($\bar{C} \\le 5$), maximizing candidate set audit ranking.\n",
     "4. **Precision-First Calibration ($F_{0.5}$ King)**: In $F_{0.5}$, False Positives are penalized 2× harder than False Negatives. High-confidence gates and singleton protection ensure near-perfect precision.\n",
-    "5. **Graph Transitivity Closure**: Consolidates multi-source clusters ($S_1 \\leftrightarrow S_2 \\leftrightarrow S_3$).\n",
-    "6. **Official Validation**: Automatically runs `utils/validate_submission.py` ensuring `PASS` across all 1,732,544 test entities."
+    "5. **Official Validation**: Automatically runs `utils/validate_submission.py` ensuring `PASS` across all 1,732,544 test entities."
    ]
   },
   {
