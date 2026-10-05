@@ -1,0 +1,363 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "provenance": [],
+      "toc_visible": true
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    },
+    "accelerator": "NONE"
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "# \ud83d\ude80 Amazon ML Challenge 2026: Business Entity Resolution\n",
+        "## High-Performance Execution on Google Colab (Pro / AI Pro)\n",
+        "\n",
+        "This notebook orchestrates the complete, end-to-end execution of the offline Business Entity Resolution system on the **full competition dataset** (~2.2M train S1, ~10.3M train targets, ~1.73M test S1, ~10M test targets).\n",
+        "\n",
+        "### \ud83d\udca1 Why Colab Pro / Google AI Pro?\n",
+        "- **High-RAM CPU Runtime**: Provides **~52 GB RAM** and **8\u201316 vCPUs**.\n",
+        "- **Fast NVMe Disk**: ~150\u2013225 GB free disk space.\n",
+        "- **Parallel Speed**: With `configs/cloud.json` (`8` feature extraction workers, `16` LightGBM threads), the full inference on ~86M candidate pairs runs in **~1.5 to 2 hours** (compared to 15+ hours on a laptop).\n",
+        "\n",
+        "> **Colab Setup Tip**:\n",
+        "> Go to **Runtime** > **Change runtime type** > Select **CPU** with **High-RAM** enabled. (GPU is not required since the pipeline is CPU-optimized with multi-threaded RapidFuzz, DuckDB, and LightGBM)."
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 1. Check Hardware & System Resources\n",
+        "Let's confirm the CPU cores, RAM, and disk space available in this session."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "import os, psutil, shutil\n",
+        "\n",
+        "ram_gb = psutil.virtual_memory().total / (1024**3)\n",
+        "cpu_count = os.cpu_count()\n",
+        "disk_gb = shutil.disk_usage(\"/\").free / (1024**3)\n",
+        "\n",
+        "print(f\"RAM available: {ram_gb:.2f} GB\")\n",
+        "print(f\"CPU cores / threads: {cpu_count}\")\n",
+        "print(f\"Disk space available: {disk_gb:.2f} GB\")\n",
+        "\n",
+        "if ram_gb < 25:\n",
+        "    print(\"\u26a0\ufe0f Notice: Standard RAM detected. Recommended: Runtime -> Change runtime type -> High-RAM.\")\n",
+        "else:\n",
+        "    print(\"\u2705 High-RAM instance active! Ready for full-scale processing.\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 2. Setup Project Files in Colab\n",
+        "You have two options to load your project into Colab:\n",
+        "- **Option A (Recommended)**: Mount Google Drive and unzip `aws_challenge_colab.zip` directly.\n",
+        "- **Option B**: Upload `aws_challenge_colab.zip` to Colab's file browser and unzip it."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Option A: Mount Google Drive (Uncomment if using Google Drive)\n",
+        "# from google.colab import drive\n",
+        "# drive.mount('/content/drive')\n",
+        "# !cp /content/drive/MyDrive/aws_challenge_colab.zip /content/aws_challenge_colab.zip\n",
+        "\n",
+        "# Unzip project archive into Colab local disk (/content/)\n",
+        "!unzip -q -o /content/aws_challenge_colab.zip -d /content/\n",
+        "%cd /content\n",
+        "!ls -lh"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 3. Install Required Dependencies\n",
+        "Install the pinned high-performance libraries (DuckDB, RapidFuzz, LightGBM, PyArrow, etc.)."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "!pip install -q -r code/business_entity_resolution/requirements.txt\n",
+        "!pip install -q pytest"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 4. Run Verification Test Suite\n",
+        "Run all 15 unit and integration tests to ensure deterministic metric calculation, script handling, and multi-process pipelines work in this environment."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "!python -m pytest code/business_entity_resolution/tests -v"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 5. Generate Hardware-Adaptive Configuration\n",
+        "This cell detects your instance's exact RAM and CPU count and generates `configs/colab_auto.json` tailored to maximize performance without hitting OOM limits."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "import os, psutil, json\n",
+        "from pathlib import Path\n",
+        "\n",
+        "ram_gb = psutil.virtual_memory().total / (1024**3)\n",
+        "cpu_count = os.cpu_count() or 2\n",
+        "\n",
+        "colab_cfg = {\n",
+        "    \"memory_limit\": f\"{max(4, int(ram_gb * 0.45))}GB\",\n",
+        "    \"threads\": min(cpu_count, 8),\n",
+        "    \"model_threads\": min(cpu_count, 16),\n",
+        "    \"feature_workers\": max(1, cpu_count // 2 if ram_gb < 20 else cpu_count),\n",
+        "    \"max_rss_gb\": round(ram_gb - 2.5, 1),\n",
+        "    \"min_free_gb\": 10.0\n",
+        "}\n",
+        "\n",
+        "cfg_path = Path(\"code/business_entity_resolution/configs/colab_auto.json\")\n",
+        "cfg_path.write_text(json.dumps(colab_cfg, indent=2))\n",
+        "print(f\"Detected: {ram_gb:.1f} GB RAM, {cpu_count} CPUs\")\n",
+        "print(\"Adaptive configuration generated:\")\n",
+        "print(json.dumps(colab_cfg, indent=2))\n"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 6. Execute Training Workflow Through Tuning\n",
+        "This runs the first half of the sequential workflow:\n",
+        "1. **Ingest Train**: Country-partitioned Parquet storage.\n",
+        "2. **Labels**: Stratified 80/10/10 train/tune/holdout splitting with connected component grouping.\n",
+        "3. **Index Train**: Disk-backed SQLite inverted index for all ~10.3M training targets.\n",
+        "4. **Candidates Train**: Multi-pass candidate generation for sampled training/tuning S1s.\n",
+        "5. **Features Train**: RapidFuzz 58-feature extraction with parallel workers.\n",
+        "6. **Train**: LightGBM training with early stopping.\n",
+        "7. **Score Train**: Batch scoring on train/tune candidates.\n",
+        "8. **Tune**: Exact macro $F_{0.5}$ threshold sweep.\n",
+        "9. **Errors**: Detailed failure-mode analysis on false positives and false negatives."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "!python code/business_entity_resolution/run.py run \\\n",
+        "    --config code/business_entity_resolution/configs/colab_auto.json \\\n",
+        "    --work runs/full \\\n",
+        "    --through errors"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 7. Inspect Tuning Report & Errors\n",
+        "Let's view the optimal macro $F_{0.5}$ threshold and error analysis."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "import json\n",
+        "from pathlib import Path\n",
+        "tune_path = Path(\"runs/full/reports/tune.json\")\n",
+        "if tune_path.exists():\n",
+        "    print(json.dumps(json.loads(tune_path.read_text()), indent=2))\n",
+        "else:\n",
+        "    print(\"tune.json not found yet.\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 8. (Optional) Country-Transfer Check\n",
+        "Check if country-specific models (US vs India) outperform the pooled model."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Optional country transfer check:\n",
+        "# !python code/business_entity_resolution/run.py train --country US --work runs/full\n",
+        "# !python code/business_entity_resolution/run.py score --country US --split train --work runs/full\n",
+        "# !python code/business_entity_resolution/run.py train --country India --work runs/full\n",
+        "# !python code/business_entity_resolution/run.py score --country India --split train --work runs/full\n",
+        "# !python code/business_entity_resolution/run.py transfer --promote --work runs/full"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 9. Evaluate Final Holdout Set (Report Only)\n",
+        "Evaluate the locked model once on the untouched holdout set. Record these numbers for `Documentation_template.md`."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "!python code/business_entity_resolution/run.py evaluate --work runs/full\n",
+        "!python code/business_entity_resolution/run.py blocking-report --work runs/full\n",
+        "\n",
+        "import json\n",
+        "from pathlib import Path\n",
+        "holdout_path = Path(\"runs/full/reports/holdout.json\")\n",
+        "if holdout_path.exists():\n",
+        "    print(\"--- Final Holdout Metrics ---\")\n",
+        "    print(json.dumps(json.loads(holdout_path.read_text()), indent=2))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 10. Run Full Test Inference & Export\n",
+        "This runs:\n",
+        "- Test ingestion (France, India, US)\n",
+        "- Test indexing\n",
+        "- Test candidate generation (all ~1.73M test S1 entities)\n",
+        "- Streaming feature extraction + scoring (memory-efficient on-the-fly batches)\n",
+        "- Exporting `matching_results.tsv` and `candidate_pairs.tsv`\n",
+        "- Built-in disk-backed validation"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "!python code/business_entity_resolution/run.py run \\\n",
+        "    --config code/business_entity_resolution/configs/colab_auto.json \\\n",
+        "    --work runs/full \\\n",
+        "    --through validate"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 11. Run Official Competition Validator (with `--check-ids`)\n",
+        "Run the official competition script to verify format, entity coverage, and valid ID existence."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "!python student_resource/utils/validate_submission.py \\\n",
+        "    --matching output/matching_results.tsv \\\n",
+        "    --candidate output/candidate_pairs.tsv \\\n",
+        "    --test-dir student_resource/dataset/test \\\n",
+        "    --check-ids"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 12. Create Final Submission Package\n",
+        "Creates `submission.zip` containing:\n",
+        "- `output/matching_results.tsv`\n",
+        "- `output/candidate_pairs.tsv`\n",
+        "- `Documentation_template.md`\n",
+        "- Full reproducible code under `code/business_entity_resolution/`\n",
+        "- Trained LightGBM model and policy artifacts"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "!python code/business_entity_resolution/run.py package \\\n",
+        "    --work runs/full \\\n",
+        "    --output output \\\n",
+        "    --destination submission.zip\n",
+        "\n",
+        "!ls -lh submission.zip"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "### 13. Download or Save to Google Drive\n",
+        "Save `submission.zip` and the output reports back to your Google Drive or download to your local machine."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "execution_count": null,
+      "metadata": {},
+      "outputs": [],
+      "source": [
+        "# Option 1: Save directly to Google Drive\n",
+        "# !cp submission.zip /content/drive/MyDrive/\n",
+        "# !cp -r runs/full/reports /content/drive/MyDrive/aws_challenge_reports\n",
+        "# print(\"Saved to Google Drive!\")\n",
+        "\n",
+        "# Option 2: Download directly via Colab\n",
+        "from google.colab import files\n",
+        "files.download('submission.zip')"
+      ]
+    }
+  ]
+}
